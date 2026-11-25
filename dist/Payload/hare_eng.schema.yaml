@@ -1,0 +1,42 @@
+# Rime schema: hare_eng
+# encoding: utf-8
+schema:
+  schema_id: hare_eng
+  name: Hare English
+  version: "2026.11.25"
+  author:
+    - Hare IME Project
+  description: >-
+    Permissive commercial-safe English dictionary for Rime & Hare IME.
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [ English, ASCII ]
+
+engine:
+  processors:
+    - ascii_composer
+    - key_binder
+    - speller
+    - recognizer
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - table_translator
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA
+  delimiter: " '"
+
+translator:
+  dictionary: hare_eng
+  enable_sentence: false
+  enable_user_dict: false

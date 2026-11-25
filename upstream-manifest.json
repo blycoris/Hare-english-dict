@@ -1,0 +1,74 @@
+{
+  "version": "2026.11.25",
+  "built_at_utc": "2026-11-25T10:09:55Z",
+  "aosp_commit": null,
+  "upstream_sources": {
+    "aosp_en_US": {
+      "url": "https://android.googlesource.com/platform/packages/inputmethods/LatinIME/+/refs/heads/main/dictionaries/en_US_wordlist.combined.gz?format=TEXT",
+      "license": "Apache-2.0",
+      "header": {
+        "dictionary": "main:en_us",
+        "locale": "en_US",
+        "description": "English (US)",
+        "date": "1414726260",
+        "version": "54"
+      },
+      "sha256": "b039d9f26aa3e9e999f045158271728e6664f0123fc65a4d9a3725c4040c746c"
+    },
+    "aosp_en_GB": {
+      "url": "https://android.googlesource.com/platform/packages/inputmethods/LatinIME/+/refs/heads/main/dictionaries/en_GB_wordlist.combined.gz?format=TEXT",
+      "license": "Apache-2.0",
+      "header": {
+        "dictionary": "main:en_gb",
+        "locale": "en_GB",
+        "description": "English (UK)",
+        "date": "1414726258",
+        "version": "54"
+      },
+      "sha256": "4716c9ec06b579f2c9c78ccd114a61865eb117d6b8bf125f20cfd80ce4fe199b"
+    },
+    "scowl_base": {
+      "path": "data/scowl_base.txt",
+      "license": "SCOWL"
+    },
+    "tatoeba_base": {
+      "path": "data/tatoeba_base.txt",
+      "license": "CC BY 2.0 FR"
+    },
+    "modern_supplement": {
+      "path": "data/modern_supplement.tsv",
+      "license": "CC0-1.0"
+    }
+  },
+  "input_digests": {
+    "aosp_en_US_sha256": "b039d9f26aa3e9e999f045158271728e6664f0123fc65a4d9a3725c4040c746c",
+    "aosp_en_GB_sha256": "4716c9ec06b579f2c9c78ccd114a61865eb117d6b8bf125f20cfd80ce4fe199b",
+    "scowl_base_sha256": "f7bc0762914276e04ce42209bdaf213d7031b4818af302907e91b0055171ae38",
+    "tatoeba_base_sha256": "5c4a6ce690dddb6f2ef002c2bc4d46f0d324f614499079cbf1c7d3fb8a01adc4",
+    "modern_supplement_sha256": "13245a27f39ca5b22344f98d4ce3242174268757ed2176d96c58d465cb58d51b",
+    "compiler_sha256": "2e7f1d310b4df3e24585252d5ead99a08f10e90d04d6104c8590b08b0c43c742"
+  },
+  "outputs": {
+    "EnglishLexicon.txt": {
+      "entries": 81045,
+      "bytes": 1204074,
+      "sha256": "1fb9c2b3cb0d04fc0d03b7359051bc8aec248dffa838ffaad988786a65c48f83",
+      "tier_counts": {
+        "0": 6754,
+        "1": 9227,
+        "2": 43243,
+        "3": 21821
+      },
+      "avoid_autocorrect_count": 587
+    },
+    "EnglishFollowers.txt": {
+      "keys": 7899,
+      "bytes": 221836,
+      "sha256": "bad766f3085cfb76fc9f26325a34b8f738dc90f10a57a270d40839632821e13e"
+    },
+    "hare-english-rime.zip": {
+      "bytes": 538764,
+      "sha256": "99f92c632731416a0a6445da63a90966b5a495f55055dc74ff58ea488867eea2"
+    }
+  }
+}

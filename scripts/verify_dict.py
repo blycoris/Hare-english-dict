@@ -14,6 +14,9 @@ DIST_DIR = ROOT / "dist"
 DATA_DIR = ROOT / "data"
 MANIFEST_PATH = ROOT / "upstream-manifest.json"
 WORD_RE = re.compile(r"^[A-Za-z][A-Za-z']*$")
+FOLLOWER_KEY_RE = re.compile(r"^[a-z]+(?: [a-z]+)?$")
+FOLLOWER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z']*(?:_[A-Za-z][A-Za-z']*)*$")
+VALID_FLAGS = {"", "o", "u", "b", "uo", "bo"}
 
 
 def key_of(word: str) -> str:
@@ -31,15 +34,18 @@ def sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
-def verify_lexicon() -> dict[str, list[tuple[str, int, int, bool]]]:
+def verify_lexicon() -> dict[str, list[tuple[str, int, int, str]]]:
     path = DIST_DIR / "EnglishLexicon.txt"
     assert path.exists(), f"Missing {path}"
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) >= 55_000, f"Unexpectedly small lexicon: {len(lines)}"
 
-    by_key: dict[str, list[tuple[str, int, int, bool]]] = {}
+    by_key: dict[str, list[tuple[str, int, int, str]]] = {}
+    by_word: dict[str, tuple[int, int, str]] = {}
     prev_key = ""
     offensive_count = 0
+    us_count = 0
+    uk_count = 0
     tier_counts = [0, 0, 0, 0]
 
     for lineno, line in enumerate(lines, 1):
@@ -52,17 +58,22 @@ def verify_lexicon() -> dict[str, list[tuple[str, int, int, bool]]]:
         weight = int(weight_s)
         assert 0 <= tier <= 3, f"Line {lineno}: invalid tier {tier}"
         assert 0 <= weight <= 255, f"Line {lineno}: invalid weight {weight}"
-        assert flags in ("", "o"), f"Line {lineno}: invalid flags {flags!r}"
-        avoid = "o" in flags
-        if avoid:
+        assert flags in VALID_FLAGS, f"Line {lineno}: invalid flags {flags!r}"
+        assert not ("u" in flags and "b" in flags), f"Line {lineno}: conflicting dialect flags {flags!r}"
+        if "o" in flags:
             offensive_count += 1
+        if "u" in flags:
+            us_count += 1
+        if "b" in flags:
+            uk_count += 1
         tier_counts[tier] += 1
 
         k = key_of(word)
         assert k.isascii() and k.islower(), f"Line {lineno}: non-lowercase ASCII key {k!r}"
         assert k >= prev_key, f"Line {lineno}: binary-search sort violated: {prev_key!r} > {k!r}"
         prev_key = k
-        by_key.setdefault(k, []).append((word, tier, weight, avoid))
+        by_key.setdefault(k, []).append((word, tier, weight, flags))
+        by_word[word] = (tier, weight, flags)
 
     # Single-letter invariant: ONLY "I" and "a"
     single_letter = [k for k in by_key if len(k) == 1]
@@ -121,7 +132,53 @@ def verify_lexicon() -> dict[str, list[tuple[str, int, int, bool]]]:
     assert offensive_count >= 500, f"Expected >= 500 offensive-flagged entries, got {offensive_count}"
     for profanity in ("fuck", "shit"):
         assert profanity in by_key, f"Expected exact-typed entry for {profanity}"
-        assert all(e[3] for e in by_key[profanity]), f"{profanity} must have avoidAutocorrect ('o') flag"
+        assert all("o" in e[3] for e in by_key[profanity]), f"{profanity} must have avoidAutocorrect ('o') flag"
+
+    # Regional dialect flag checks (US "u" vs UK "b" vs universal unrestricted)
+    assert us_count >= 150, f"Too few US dialect entries: {us_count}"
+    assert uk_count >= 150, f"Too few UK dialect entries: {uk_count}"
+    for us_word, uk_word in (
+        ("color", "colour"),
+        ("favorite", "favourite"),
+        ("center", "centre"),
+        ("theater", "theatre"),
+        ("organize", "organise"),
+        ("defense", "defence"),
+        ("traveling", "travelling"),
+        ("canceled", "cancelled"),
+        ("gray", "grey"),
+        ("aluminum", "aluminium"),
+        ("mom", "mum"),
+        ("math", "maths"),
+        ("pajamas", "pyjamas"),
+        ("jewelry", "jewellery"),
+        ("curb", "kerb"),
+    ):
+        assert us_word in by_word and "u" in by_word[us_word][2], f"Expected US 'u' flag on {us_word!r}: {by_word.get(us_word)}"
+        assert uk_word in by_word and "b" in by_word[uk_word][2], f"Expected UK 'b' flag on {uk_word!r}: {by_word.get(uk_word)}"
+
+    # UK-only spellings whose US counterparts are universal everyday words (must NOT restrict US counterpart)
+    for uk_only, universal in (
+        ("tyre", "tire"),
+        ("cheque", "check"),
+        ("programme", "program"),
+        ("practise", "practice"),
+        ("licence", "license"),
+    ):
+        assert uk_only in by_word and "b" in by_word[uk_only][2], f"Expected UK 'b' flag on {uk_only!r}: {by_word.get(uk_only)}"
+        assert universal in by_word and "u" not in by_word[universal][2] and "b" not in by_word[universal][2], (
+            f"Universal word {universal!r} must NOT have dialect flag: {by_word.get(universal)}"
+        )
+    for universal in ("story", "flat", "lift", "laboratory", "literature", "analysis", "organism", "optimism", "honorary", "humorous"):
+        assert universal in by_word and "u" not in by_word[universal][2] and "b" not in by_word[universal][2], (
+            f"Universal word {universal!r} must NOT have dialect flag: {by_word.get(universal)}"
+        )
+
+    # Key UK everyday words must retain tier 0/1 base strength
+    for uk_core in ("colour", "centre", "organise", "favourite", "travelling", "cancelled", "grey", "mum", "maths", "cheque", "programme", "theatre"):
+        assert uk_core in by_word and by_word[uk_core][0] <= 1, (
+            f"Expected UK word {uk_core!r} to be tier 0/1, got {by_word.get(uk_core)}"
+        )
 
     # Tier sanity checks
     assert 3_000 <= tier_counts[0] <= 12_000, f"Tier 0 count out of range: {tier_counts}"
@@ -129,7 +186,7 @@ def verify_lexicon() -> dict[str, list[tuple[str, int, int, bool]]]:
 
     print(
         f"[ok] EnglishLexicon.txt: {len(lines)} entries, {path.stat().st_size // 1024} KB, "
-        f"tiers={tier_counts}, avoidAutocorrect={offensive_count}"
+        f"tiers={tier_counts}, avoidAutocorrect={offensive_count}, us={us_count}, uk={uk_count}"
     )
     return by_key
 
@@ -137,26 +194,81 @@ def verify_lexicon() -> dict[str, list[tuple[str, int, int, bool]]]:
 def verify_followers() -> None:
     path = DIST_DIR / "EnglishFollowers.txt"
     assert path.exists(), f"Missing {path}"
+    size_bytes = path.stat().st_size
+    assert size_bytes < 300 * 1024, f"EnglishFollowers.txt too large: {size_bytes} bytes (limit 300 KB)"
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) >= 7_000, f"Too few follower keys: {len(lines)}"
 
     prev_key = ""
     table: dict[str, list[str]] = {}
+    two_word_count = 0
+    phrase_follower_count = 0
     for lineno, line in enumerate(lines, 1):
         parts = line.split("\t")
         assert len(parts) == 2, f"Followers line {lineno}: invalid format {line!r}"
         k, rest = parts
-        assert k >= prev_key, f"Followers line {lineno}: unsorted keys {prev_key!r} > {k!r}"
+        assert FOLLOWER_KEY_RE.match(k), f"Followers line {lineno}: invalid key {k!r}"
+        assert k > prev_key, f"Followers line {lineno}: unsorted/duplicate keys {prev_key!r} >= {k!r}"
         prev_key = k
+        if " " in k:
+            two_word_count += 1
         words = rest.split(" ")
         assert 1 <= len(words) <= 6, f"Followers line {lineno}: expected 1..6 followers, got {words}"
+        for w in words:
+            assert FOLLOWER_TOKEN_RE.match(w), f"Followers line {lineno}: invalid follower token {w!r}"
+            if "_" in w:
+                phrase_follower_count += 1
         table[k] = words
 
-    for lhs, rhs in (("of", "the"), ("in", "the"), ("going", "to"), ("thank", "you"), ("a", "lot")):
-        assert rhs in table.get(lhs, []), f"Expected bigram {lhs!r} -> {rhs!r}, got {table.get(lhs)}"
+    assert two_word_count >= 1_000, f"Expected >= 1000 two-word context keys, got {two_word_count}"
+    assert phrase_follower_count >= 10, f"Expected >= 10 multi-word '_' phrase followers, got {phrase_follower_count}"
+
+    # Single-word bigram & phrase-follower checks
+    for lhs, rhs in (
+        ("of", "the"),
+        ("in", "the"),
+        ("going", "to"),
+        ("thank", "you"),
+        ("a", "lot"),
+        ("let", "me_know"),
+        ("on", "my_way"),
+        ("thank", "you_so_much"),
+        ("see", "you_soon"),
+        ("looking", "forward_to"),
+        ("by", "the_way"),
+        ("as", "soon_as"),
+    ):
+        assert rhs in table.get(lhs, []), f"Expected follower {lhs!r} -> {rhs!r}, got {table.get(lhs)}"
     assert "I" in table.get("and", []) or "I" in table.get("but", [])
 
-    print(f"[ok] EnglishFollowers.txt: {len(lines)} keys, {path.stat().st_size // 1024} KB")
+    # Two-word context trigram checks
+    for ctx, rhs in (
+        ("on my", "way"),
+        ("let me", "know"),
+        ("thank you", "so_much"),
+        ("looking forward", "to"),
+        ("as soon", "as"),
+        ("be right", "back"),
+        ("talk to", "you"),
+        ("have a", "good"),
+        ("how are", "you"),
+        ("what do", "you"),
+        ("i dont", "know"),
+        ("i cant", "wait"),
+        ("by the", "way"),
+        ("at the", "moment"),
+        ("see you", "soon"),
+        ("make sure", "you"),
+        ("going to", "be"),
+        ("want to", "be"),
+        ("need to", "be"),
+    ):
+        assert rhs in table.get(ctx, []), f"Expected trigram {ctx!r} -> {rhs!r}, got {table.get(ctx)}"
+
+    print(
+        f"[ok] EnglishFollowers.txt: {len(lines)} keys ({two_word_count} 2-word, "
+        f"{phrase_follower_count} phrase tokens), {size_bytes // 1024} KB"
+    )
 
 
 def verify_rime_zip() -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bz2
 import collections
 import datetime as dt
 import gzip
@@ -38,8 +39,11 @@ DATA_DIR = ROOT / "data"
 DIST_DIR = ROOT / "dist"
 PAYLOAD_DIR = DIST_DIR / "Payload"
 MANIFEST_PATH = ROOT / "upstream-manifest.json"
+DEFAULT_TATOEBA_BZ2 = pathlib.Path.home() / "HareML" / "english-context" / "eng_sentences.tsv.bz2"
 
 WORD_RE = re.compile(r"^[A-Za-z][A-Za-z']*$")
+FOLLOWER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z']*(?:_[A-Za-z][A-Za-z']*)*$")
+SENTENCE_TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 AOSP_SOURCES = {
     "en_US": [
@@ -99,8 +103,203 @@ CONTRACTION_ONLY_KEYS: Dict[str, str] = {
     "shouldnt": "shouldn't",
 }
 
+# Regional spelling classification ("b" = UK-preferred, "u" = US-preferred).
+# Universal everyday words in BOTH US and UK are NEVER restricted.
+UNIVERSAL_DIALECT_EXCLUSIONS: Set[str] = {
+    # Common everyday universal meanings in both US and UK
+    "tire", "tires", "tired", "tiring",
+    "check", "checks", "checked", "checking",
+    "program", "programs", "programmed", "programming",
+    "story", "stories",
+    "flat", "flats",
+    "lift", "lifts",
+    "practice", "practices", "practiced", "practicing",
+    "license", "licenses", "licensed", "licensing",
+    "draft", "drafts", "drafted", "drafting",
+    # Morphologically distinct universal words that happen to share a stem prefix
+    "honorary", "honorific",
+    "humorous", "humorously", "humorist", "humorists", "humoral",
+    "vigorous", "vigorously",
+    "valorous",
+    "odorous", "odoriferous",
+    "laboratory", "laboratories", "laborious", "laboriously",
+    "literal", "literally", "literary", "literature", "literate", "literacy",
+    "organism", "organisms", "organist", "organists",
+    "realism", "realist", "realists", "realistic", "realistically",
+    "analysis", "analyses", "analyst", "analysts",
+    "paralysis",
+    "apologist", "apologists",
+    "criticism", "criticisms",
+    "emphasis",
+    "optimism", "optimist", "optimists", "optimistic", "optimistically",
+    "analogy", "analogies", "analogous",
+    "greyhound", "greyhounds",
+    "mummy", "mummies",
+    "cancellation", "cancellations",
+    "colorado", "coloratura", "armorial",
+    "sombrero", "sombreros",
+    "programmer", "programmers", "programmer's",
+}
+
+UK_SAFE_PREFIXES: Tuple[str, ...] = (
+    "colour", "favour", "flavour", "honour", "humour", "labour", "neighbour",
+    "behaviour", "rumour", "harbour", "armour", "endeavour", "saviour",
+    "splendour", "vigour", "odour", "tumour", "valour", "parlour",
+    "centre", "theatre", "metre", "litre", "fibre", "calibre", "sombre",
+    "recognis", "summaris", "prioritis", "customis",
+    "defence", "offence", "pretence", "licence", "practise",
+    "catalogue", "dialogue", "analogue", "programme",
+    "traveller", "sceptic", "aeroplane", "artefact", "doughnut",
+    "plough", "draught", "cheque", "tyre", "kerb",
+)
+
+UK_EXACT_WORDS: Set[str] = {
+    "organise", "organises", "organised", "organising", "organiser", "organisers",
+    "organisation", "organisations", "organisational",
+    "realise", "realises", "realised", "realising", "realisation", "realisations",
+    "analyse", "analysed", "analysing", "analyser", "analysers",
+    "paralyse", "paralyses", "paralysed", "paralysing",
+    "apologise", "apologises", "apologised", "apologising",
+    "criticise", "criticises", "criticised", "criticising",
+    "emphasise", "emphasises", "emphasised", "emphasising",
+    "optimise", "optimises", "optimised", "optimising",
+    "optimisation", "optimisations", "optimiser", "optimisers",
+    "travelled", "travelling",
+    "cancelled", "cancelling",
+    "labelled", "labelling",
+    "modelled", "modelling",
+    "signalled", "signalling",
+    "jewellery",
+    "grey", "greys", "greyed", "greying", "greyish", "greyness",
+    "aluminium",
+    "cosy", "cosier", "cosiest", "cosily", "cosiness",
+    "fulfil", "fulfils", "fulfilment",
+    "skilful", "skilfully", "skilfulness",
+    "enrol", "enrols", "enrolment", "enrolments",
+    "instalment", "instalments",
+    "mum", "mums",
+    "maths",
+    "pyjamas",
+}
+
+US_SAFE_PREFIXES: Tuple[str, ...] = (
+    "color", "favor", "flavor", "neighbor", "behavior", "rumor", "harbor",
+    "armor", "endeavor", "savior", "splendor", "parlor",
+    "center", "theater", "fiber", "caliber", "somber",
+    "organiz", "realiz", "recogniz", "analyz", "paralyz", "apologiz",
+    "criticiz", "emphasiz", "summariz", "optimiz", "prioritiz", "customiz",
+    "defense", "offense", "pretense",
+    "traveler", "skeptic", "airplane", "artifact", "donut", "plow", "curb",
+)
+
+US_EXACT_WORDS: Set[str] = {
+    "honor", "honors", "honored", "honoring", "honorable", "honorably",
+    "humor", "humors", "humored", "humoring", "humorless",
+    "labor", "labors", "labored", "laboring", "laborer", "laborers",
+    "vigor", "vigors",
+    "odor", "odors", "odorless",
+    "tumor", "tumors",
+    "valor",
+    "meter", "meters", "metered", "metering",
+    "liter", "liters",
+    "catalog", "catalogs", "cataloged", "cataloging",
+    "dialog", "dialogs",
+    "analog", "analogs",
+    "traveled", "traveling",
+    "canceled", "canceling",
+    "labeled", "labeling",
+    "modeled", "modeling",
+    "signaled", "signaling",
+    "jewelry",
+    "gray", "grays", "grayed", "graying", "grayish", "grayness",
+    "aluminum",
+    "cozy", "cozier", "coziest", "cozily", "coziness",
+    "fulfill", "fulfills", "fulfillment",
+    "skillful", "skillfully", "skillfulness",
+    "enroll", "enrolls", "enrollment", "enrollments",
+    "installment", "installments",
+    "mom", "moms", "mommy", "mommies",
+    "math",
+    "pajamas",
+}
+
+# Everyday UK spellings whose AOSP en_GB weight lags their everyday UK tier.
+UK_EVERYDAY_WEIGHT_FLOORS: Dict[str, int] = {
+    "mum": 158,
+    "mums": 148,
+    "cheque": 156,
+    "cheques": 146,
+    "tyre": 154,
+    "tyres": 148,
+}
+
+# Morphological suffix swap tables for automatic AOSP US/UK dialect detection.
+UK_TO_US_SUFFIXES: Tuple[Tuple[str, str], ...] = (
+    ("isations", "izations"),
+    ("isation", "ization"),
+    ("isers", "izers"),
+    ("iser", "izer"),
+    ("ising", "izing"),
+    ("ised", "ized"),
+    ("ises", "izes"),
+    ("ise", "ize"),
+    ("ysing", "yzing"),
+    ("ysed", "yzed"),
+    ("yses", "yzes"),
+    ("yse", "yze"),
+    ("ourable", "orable"),
+    ("ourably", "orably"),
+    ("ouring", "oring"),
+    ("oured", "ored"),
+    ("ours", "ors"),
+    ("our", "or"),
+    ("tres", "ters"),
+    ("tre", "ter"),
+    ("bres", "bers"),
+    ("bre", "ber"),
+)
+
+US_TO_UK_SUFFIXES: Tuple[Tuple[str, str], ...] = tuple((us, uk) for uk, us in UK_TO_US_SUFFIXES)
+
+
+def classify_dialect(
+    word: str,
+    aosp_us_freq: Dict[str, int],
+    aosp_gb_freq: Dict[str, int],
+) -> str:
+    """Return 'b' (UK-preferred), 'u' (US-preferred), or '' (neutral)."""
+    low = word.lower()
+    if word != low:
+        return ""
+    if low in UNIVERSAL_DIALECT_EXCLUSIONS:
+        return ""
+    # Check UK exact/prefix first (e.g. catalogue* before catalog*, dialogue* before dialog*).
+    if low in UK_EXACT_WORDS or low.startswith(UK_SAFE_PREFIXES):
+        return "b"
+    if low in US_EXACT_WORDS or low.startswith(US_SAFE_PREFIXES):
+        return "u"
+
+    # Automatic AOSP morphological detection for lowercase words.
+    f_us = aosp_us_freq.get(low, 0)
+    f_gb = aosp_gb_freq.get(low, 0)
+    if f_gb >= 95 and f_us == 0:
+        for uk_suf, us_suf in UK_TO_US_SUFFIXES:
+            if low.endswith(uk_suf) and len(low) > len(uk_suf) + 2:
+                counterpart = low[: -len(uk_suf)] + us_suf
+                if aosp_us_freq.get(counterpart, 0) >= 70:
+                    return "b"
+    if f_us >= 95 and f_gb == 0:
+        for us_suf, uk_suf in US_TO_UK_SUFFIXES:
+            if low.endswith(us_suf) and len(low) > len(us_suf) + 2:
+                counterpart = low[: -len(us_suf)] + uk_suf
+                if aosp_gb_freq.get(counterpart, 0) >= 70:
+                    return "u"
+    return ""
+
+
 # Curated high-frequency conversational bigrams (CC0-1.0) merged ahead of / with
-# Tatoeba and AOSP bigrams to ensure everyday mobile pairs are always strong.
+# Tatoeba and AOSP bigrams to ensure everyday mobile pairs and multi-word phrase
+# followers (`_`-joined) are always strong.
 CURATED_BIGRAMS: Dict[str, List[str]] = {
     "a": ["lot", "good", "little", "few", "great", "bit"],
     "able": ["to", "do"],
@@ -108,13 +307,13 @@ CURATED_BIGRAMS: Dict[str, List[str]] = {
     "all": ["the", "of", "good", "day", "right", "about"],
     "and": ["I", "the", "then", "you", "it", "we"],
     "are": ["you", "we", "they", "the", "not", "going"],
-    "as": ["a", "well", "soon", "the", "far", "much"],
+    "as": ["a", "well", "soon", "soon_as", "the", "far"],
     "at": ["the", "least", "all", "home", "work", "first"],
-    "be": ["there", "able", "the", "a", "back", "here"],
+    "be": ["there", "able", "right_back", "the", "a", "back"],
     "because": ["I", "of", "it", "the", "you", "they"],
     "btw": ["I", "do", "are", "is", "the", "we"],
     "but": ["I", "it", "the", "you", "we", "that"],
-    "by": ["the", "way", "far", "now", "then", "myself"],
+    "by": ["the", "the_way", "way", "far", "now", "then"],
     "can": ["you", "I", "we", "be", "do", "get"],
     "cant": ["wait", "believe", "do", "make", "find", "stop"],
     "could": ["you", "be", "have", "not", "do", "get"],
@@ -147,13 +346,13 @@ CURATED_BIGRAMS: Dict[str, List[str]] = {
     "ive": ["been", "got", "never", "had", "seen", "always"],
     "just": ["a", "to", "wanted", "got", "like", "in"],
     "know": ["what", "if", "how", "that", "where", "about"],
-    "let": ["me", "us", "you", "him", "her", "it"],
+    "let": ["me", "me_know", "us", "you", "him", "her"],
     "lets": ["go", "do", "see", "get", "meet", "talk"],
     "like": ["to", "a", "the", "it", "that", "this"],
     "lmk": ["if", "when", "what", "how", "once"],
     "lol": ["I", "that", "yeah", "no", "it", "you"],
     "look": ["at", "like", "for", "forward", "up", "good"],
-    "looking": ["for", "forward", "at", "good", "like", "great"],
+    "looking": ["for", "forward", "forward_to", "at", "good", "like"],
     "make": ["sure", "it", "a", "sense", "the", "you"],
     "need": ["to", "a", "some", "the", "more", "help"],
     "no": ["problem", "worries", "way", "one", "need", "thanks"],
@@ -161,19 +360,19 @@ CURATED_BIGRAMS: Dict[str, List[str]] = {
     "of": ["the", "course", "my", "a", "us", "them"],
     "ok": ["thanks", "sounds", "cool", "great", "got", "I"],
     "okay": ["thanks", "sounds", "great", "cool", "got", "I"],
-    "on": ["the", "my", "your", "a", "this", "it"],
+    "on": ["the", "my", "my_way", "your", "a", "this"],
     "one": ["of", "more", "day", "thing", "second", "minute"],
     "out": ["of", "the", "there", "here", "for", "to"],
     "please": ["let", "send", "do", "check", "don't", "call"],
     "right": ["now", "away", "here", "there", "back", "on"],
-    "see": ["you", "if", "what", "the", "it", "how"],
+    "see": ["you", "you_soon", "if", "what", "the", "it"],
     "she": ["is", "was", "has", "said", "will", "can"],
     "should": ["be", "I", "we", "have", "not", "do"],
     "so": ["much", "I", "good", "far", "many", "sorry"],
     "sounds": ["good", "great", "like", "awesome", "amazing"],
     "take": ["a", "care", "the", "it", "your", "some"],
     "tbh": ["I", "it", "that", "the", "you", "we"],
-    "thank": ["you", "goodness", "god", "him", "her", "them"],
+    "thank": ["you", "you_so_much", "goodness", "god", "him", "her"],
     "thanks": ["for", "a", "so", "again", "man", "everyone"],
     "that": ["is", "was", "would", "I", "the", "you"],
     "thats": ["great", "a", "good", "true", "why", "awesome"],
@@ -203,6 +402,38 @@ CURATED_BIGRAMS: Dict[str, List[str]] = {
     "you": ["are", "can", "have", "know", "want", "think"],
     "youre": ["welcome", "the", "so", "not", "right", "going"],
     "your": ["time", "help", "name", "email", "message", "day"],
+}
+
+# Curated high-signal two-word context keys (CC0-1.0) with optional `_`-joined
+# multi-word phrase followers for next-word prediction.
+CURATED_TRIGRAMS: Dict[str, List[str]] = {
+    "on my": ["way", "own", "phone", "mind"],
+    "let me": ["know", "see", "check", "think"],
+    "thank you": ["so_much", "for", "very_much"],
+    "looking forward": ["to", "to_it", "to_seeing"],
+    "as soon": ["as", "as_possible"],
+    "be right": ["back", "there"],
+    "talk to": ["you", "you_soon", "you_later"],
+    "have a": ["good", "great", "nice"],
+    "how are": ["you", "you_doing", "things"],
+    "what do": ["you", "you_think", "you_mean"],
+    "i dont": ["know", "think", "have", "want"],
+    "i cant": ["wait", "believe", "make"],
+    "by the": ["way", "time"],
+    "at the": ["moment", "same_time", "end"],
+    "in the": ["morning", "future", "meantime"],
+    "a lot": ["of", "more", "better"],
+    "kind of": ["like", "a"],
+    "out of": ["the", "office", "stock"],
+    "see you": ["soon", "tomorrow", "later"],
+    "take care": ["of"],
+    "make sure": ["you", "to", "that"],
+    "would like": ["to"],
+    "going to": ["be", "the", "have"],
+    "want to": ["be", "go", "do", "see"],
+    "need to": ["be", "do", "go", "get"],
+    "able to": ["get", "make", "do", "see"],
+    "supposed to": ["be", "do"],
 }
 
 
@@ -460,6 +691,9 @@ def load_tatoeba_base(path: pathlib.Path) -> Dict[str, List[str]]:
 
 
 def normalize_follower_word(word: str) -> str:
+    if "_" in word:
+        parts = [normalize_follower_word(p) for p in word.split("_") if p]
+        return "_".join(parts)
     low = word.lower()
     if low == "i":
         return "I"
@@ -468,13 +702,108 @@ def normalize_follower_word(word: str) -> str:
     return low
 
 
+def extract_tatoeba_trigrams(
+    bz2_path: pathlib.Path,
+    valid_keys: Set[str],
+    avoid_keys: Set[str],
+    limit: int = 1_200,
+    min_count: int = 15,
+) -> Dict[str, List[str]]:
+    """Extract top empirical two-word context followers from Tatoeba sentences (CC BY 2.0 FR)."""
+    mid_cap: collections.Counter = collections.Counter()
+    mid_low: collections.Counter = collections.Counter()
+    trigrams: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+
+    with bz2.open(bz2_path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\r\n").split("\t")
+            if len(parts) < 3:
+                continue
+            sent = parts[2].replace("\u2019", "'").replace("\u2018", "'")
+            clauses = re.split(r"[.,!?;:()\[\]\"“”\n]+", sent)
+            for ci, clause in enumerate(clauses):
+                toks = SENTENCE_TOKEN_RE.findall(clause)
+                for i, tok in enumerate(toks):
+                    low = tok.lower()
+                    if ci > 0 or i > 0:
+                        if tok[0].isupper():
+                            mid_cap[low] += 1
+                        else:
+                            mid_low[low] += 1
+                if len(toks) < 3:
+                    continue
+                for i in range(len(toks) - 2):
+                    w1, w2, w3 = toks[i], toks[i + 1], toks[i + 2]
+                    if i > 0 and w1[0].isupper() and not (w1 == "I" or w1.startswith("I'")):
+                        continue
+                    if w2[0].isupper() and not (w2 == "I" or w2.startswith("I'")):
+                        continue
+                    if w3[0].isupper() and not (w3 == "I" or w3.startswith("I'")):
+                        continue
+                    k1, k2 = lexicon_key(w1), lexicon_key(w2)
+                    nw3 = normalize_follower_word(w3)
+                    k3 = lexicon_key(nw3)
+                    if k1 in avoid_keys or k2 in avoid_keys or k3 in avoid_keys:
+                        continue
+                    if k1 not in valid_keys or k2 not in valid_keys or k3 not in valid_keys:
+                        continue
+                    trigrams[f"{k1} {k2}"][nw3] += 1
+
+    proper_nouns: Set[str] = set()
+    for w, c in mid_cap.items():
+        if w == "i" or w.startswith("i'"):
+            continue
+        if c >= 5 and c / (c + mid_low[w]) >= 0.25:
+            proper_nouns.add(lexicon_key(w))
+
+    ranked: List[Tuple[int, str, List[str]]] = []
+    for ctx, ctr in trigrams.items():
+        k1, k2 = ctx.split(" ")
+        if k1 in proper_nouns or k2 in proper_nouns:
+            continue
+        good = [
+            (w, c)
+            for w, c in ctr.most_common(6)
+            if c >= min_count and lexicon_key(w) not in proper_nouns
+        ]
+        if good:
+            ranked.append((sum(c for _, c in good), ctx, [w for w, _ in good]))
+
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return {ctx: words for _tot, ctx, words in ranked[:limit]}
+
+
+def load_or_extract_tatoeba_trigrams(
+    trigram_cache_path: pathlib.Path,
+    bz2_path: Optional[pathlib.Path],
+    valid_keys: Set[str],
+    avoid_keys: Set[str],
+    refresh: bool = False,
+) -> Dict[str, List[str]]:
+    if bz2_path and bz2_path.exists() and (refresh or not trigram_cache_path.exists()):
+        extracted = extract_tatoeba_trigrams(bz2_path, valid_keys, avoid_keys)
+        lines = [f"{k}\t{' '.join(words)}\n" for k, words in sorted(extracted.items())]
+        trigram_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        trigram_cache_path.write_text("".join(lines), encoding="utf-8")
+        return extracted
+    return load_tatoeba_base(trigram_cache_path)
+
+
 def build_lexicon(
     aosp_us: Dict[str, Tuple[int, bool, bool, str]],
     aosp_gb: Dict[str, Tuple[int, bool, bool, str]],
     scowl: Dict[str, int],
     supplement: Dict[str, Tuple[int, bool]],
-) -> List[Tuple[str, str, int, int, bool]]:
-    """Build sorted lexicon entries: (key, word, tier, weight, avoid_autocorrect)."""
+) -> List[Tuple[str, str, int, int, bool, str]]:
+    """Build sorted lexicon entries: (key, word, tier, weight, avoid_autocorrect, flags)."""
+    # Keep separate AOSP en_US and en_GB frequency tables for dialect tagging.
+    aosp_us_freq: Dict[str, int] = {
+        w: f for w, (f, _off, not_a_word, _fl) in aosp_us.items() if not not_a_word and f > 0
+    }
+    aosp_gb_freq: Dict[str, int] = {
+        w: f for w, (f, _off, not_a_word, _fl) in aosp_gb.items() if not not_a_word and f > 0
+    }
+
     # Map word -> [weight, avoid_autocorrect]
     entries: Dict[str, List[object]] = {}
 
@@ -496,19 +825,21 @@ def build_lexicon(
                 cur[0] = weight
             cur[1] = bool(cur[1]) or avoid
 
-    # Lookup helpers for AOSP
+    # Lookup helpers for AOSP using max(f_us, f_gb) so UK spellings retain strong base weights.
     def aosp_lookup(word: str) -> Optional[Tuple[int, bool]]:
         us = aosp_us.get(word)
         gb = aosp_gb.get(word)
-        if us and not us[2] and us[0] > 0:
-            freq = us[0]
-            off = us[1]
-            if gb and not gb[2]:
-                freq = max(freq, gb[0] - 4)
-                off = off or gb[1]
-            return freq, off
-        if gb and not gb[2] and gb[0] > 0:
-            return max(1, gb[0] - 4), gb[1]
+        us_valid = us is not None and not us[2] and us[0] > 0
+        gb_valid = gb is not None and not gb[2] and gb[0] > 0
+        if us_valid and gb_valid:
+            assert us is not None and gb is not None
+            return max(us[0], gb[0]), (us[1] or gb[1])
+        if us_valid:
+            assert us is not None
+            return us[0], us[1]
+        if gb_valid:
+            assert gb is not None
+            return gb[0], gb[1]
         return None
 
     # 1. Seed ALL SCOWL baseline entries (zero loss of valid SCOWL spellings)
@@ -543,16 +874,23 @@ def build_lexicon(
         weight = calibrate_aosp_freq(freq)
         upsert(word, weight, offensive)
 
-    # 3. Add common UK spellings from AOSP en_GB (f >= 85)
+    # 3. Add UK spellings from AOSP en_GB (f >= 85 general, or f >= 35 for UK dialect spellings)
     for word, (freq, offensive, not_a_word, flags) in aosp_gb.items():
-        if not_a_word or freq < 85 or not WORD_RE.match(word):
+        if not_a_word or freq <= 0 or not WORD_RE.match(word):
             continue
         if word == "i":
             continue
+        is_uk_spelling = classify_dialect(word, aosp_us_freq, aosp_gb_freq) == "b"
+        if freq < 85 and not (is_uk_spelling and freq >= 35):
+            continue
         if word.isupper() and len(word) >= 2 and freq < 110:
             continue
-        weight = calibrate_aosp_freq(max(1, freq - 4))
+        weight = calibrate_aosp_freq(freq)
         upsert(word, weight, offensive)
+
+    # 3b. Ensure everyday UK words (e.g. mum, cheque, tyre) retain tier-1 base strength.
+    for word, floor_w in UK_EVERYDAY_WEIGHT_FLOORS.items():
+        upsert(word, floor_w, False, prefer_max=True)
 
     # 4. Optional wordfreq enrichment if installed (never required)
     try:
@@ -617,12 +955,14 @@ def build_lexicon(
 
     # 9. Build final sorted rows: strictly sorted by (key, tier, -weight, word)
     #    for O(log N) binary search in EnglishLexicon.swift.
-    rows: List[Tuple[str, str, int, int, bool]] = []
+    rows: List[Tuple[str, str, int, int, bool, str]] = []
     for word, (weight_obj, avoid_obj) in entries.items():
         weight = max(0, min(255, int(weight_obj)))
         avoid = bool(avoid_obj)
         tier = weight_to_tier(weight)
-        rows.append((lexicon_key(word), word, tier, weight, avoid))
+        dialect = classify_dialect(word, aosp_us_freq, aosp_gb_freq)
+        flags = dialect + ("o" if avoid else "")
+        rows.append((lexicon_key(word), word, tier, weight, avoid, flags))
 
     rows.sort(key=lambda r: (r[0], r[2], -r[3], r[1]))
     return rows
@@ -631,15 +971,16 @@ def build_lexicon(
 def build_followers(
     aosp_us_bigrams: Dict[str, List[Tuple[str, int]]],
     tatoeba: Dict[str, List[str]],
-    lexicon_rows: List[Tuple[str, str, int, int, bool]],
+    tatoeba_trigrams: Dict[str, List[str]],
+    lexicon_rows: List[Tuple[str, str, int, int, bool, str]],
 ) -> List[Tuple[str, List[str]]]:
-    """Build up to 12,000 follower rows with up to 6 followers per key."""
-    WORDS_KEPT = 12_000
+    """Build compact single-word + two-word context follower rows (< 300 KB)."""
+    SINGLE_WORDS_KEPT = 9_500
     MAX_FOLLOWERS = 6
 
     avoid_keys: Set[str] = set()
     key_weight: Dict[str, int] = {}
-    for k, _w, _t, wt, avoid in lexicon_rows:
+    for k, _w, _t, wt, avoid, _fl in lexicon_rows:
         if avoid:
             avoid_keys.add(k)
         else:
@@ -647,16 +988,15 @@ def build_followers(
 
     merged: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
 
-    # 1. Tatoeba baseline (everyday conversational sentences)
+    # 1. Tatoeba single-word baseline (everyday conversational sentences)
     for k, words in tatoeba.items():
-        if k in avoid_keys:
+        if k in avoid_keys or " " in k:
             continue
         for idx, w in enumerate(words):
             nw = normalize_follower_word(w)
             nk = lexicon_key(nw)
             if nk in avoid_keys or not WORD_RE.match(nw):
                 continue
-            # Rank-weighted score (rank 0 = 100, rank 1 = 80, ...)
             merged[k][nw] += max(20, 100 - idx * 18)
 
     # 2. AOSP bigrams (when present in upstream file)
@@ -670,28 +1010,58 @@ def build_followers(
                 continue
             merged[k][nw] += max(15, bfreq)
 
-    # 3. Curated high-frequency mobile bigrams
+    # 3. Curated high-frequency mobile bigrams (including `_`-joined multi-word phrase followers)
     for k, words in CURATED_BIGRAMS.items():
         for idx, w in enumerate(words):
             nw = normalize_follower_word(w)
-            merged[k][nw] += max(40, 160 - idx * 20)
+            if not FOLLOWER_TOKEN_RE.match(nw):
+                continue
+            # Ensure curated order (including multi-word phrase starters) ranks in top 6.
+            merged[k][nw] += max(80, 260 - idx * 25)
 
-    # Select top WORDS_KEPT keys by (lexicon weight, total follower score, key)
-    ranked_keys = sorted(
+    # Select top SINGLE_WORDS_KEPT single-word keys by (lexicon weight, total follower score, key)
+    ranked_single = sorted(
         merged.keys(),
         key=lambda k: (-key_weight.get(k, 0), -sum(merged[k].values()), k),
-    )[:WORDS_KEPT]
+    )[:SINGLE_WORDS_KEPT]
 
-    rows: List[Tuple[str, List[str]]] = []
-    for k in sorted(ranked_keys):
+    table: Dict[str, List[str]] = {}
+    for k in ranked_single:
         top = [w for w, _ in merged[k].most_common(MAX_FOLLOWERS)]
         if top:
-            rows.append((k, top))
-    return rows
+            table[k] = top
+
+    # 4. Two-word context keys (empirical Tatoeba trigrams + curated conversational phrases)
+    trigram_merged: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for ctx, words in tatoeba_trigrams.items():
+        parts = ctx.split(" ")
+        if len(parts) != 2 or parts[0] in avoid_keys or parts[1] in avoid_keys:
+            continue
+        for idx, w in enumerate(words):
+            nw = normalize_follower_word(w)
+            if not FOLLOWER_TOKEN_RE.match(nw):
+                continue
+            if any(lexicon_key(p) in avoid_keys for p in nw.split("_")):
+                continue
+            trigram_merged[ctx][nw] += max(20, 100 - idx * 16)
+
+    for ctx, words in CURATED_TRIGRAMS.items():
+        for idx, w in enumerate(words):
+            nw = normalize_follower_word(w)
+            if not FOLLOWER_TOKEN_RE.match(nw):
+                continue
+            trigram_merged[ctx][nw] += max(120, 320 - idx * 30)
+
+    for ctx, ctr in trigram_merged.items():
+        top = [w for w, _ in ctr.most_common(MAX_FOLLOWERS)]
+        if top:
+            table[ctx] = top
+
+    return sorted(table.items(), key=lambda item: item[0])
 
 
 def write_rime_package(
-    rows: List[Tuple[str, str, int, int, bool]],
+    rows: List[Tuple[str, str, int, int, bool, str]],
     version: str,
 ) -> pathlib.Path:
     """Write dist/Payload/hare_eng.dict.yaml, hare_eng.schema.yaml, and deterministic zip."""
@@ -710,7 +1080,7 @@ sort: by_weight
 ...
 """
     dict_lines = [dict_header]
-    for k, word, _tier, weight, avoid in rows:
+    for k, word, _tier, weight, avoid, _flags in rows:
         if avoid:
             continue
         # Rime weight: scaled integer preserving ordering
@@ -794,6 +1164,17 @@ def main() -> int:
         help="Skip rebuild if upstream + input digests match upstream-manifest.json.",
     )
     parser.add_argument("--force", action="store_true", help="Force rebuild even when digests match.")
+    parser.add_argument(
+        "--tatoeba-sentences",
+        type=pathlib.Path,
+        default=DEFAULT_TATOEBA_BZ2,
+        help="Optional Tatoeba eng_sentences.tsv.bz2 used to refresh data/tatoeba_trigrams.txt.",
+    )
+    parser.add_argument(
+        "--refresh-trigrams",
+        action="store_true",
+        help="Force re-extraction of data/tatoeba_trigrams.txt from --tatoeba-sentences.",
+    )
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args()
 
@@ -803,13 +1184,32 @@ def main() -> int:
 
     scowl_path = DATA_DIR / "scowl_base.txt"
     tatoeba_path = DATA_DIR / "tatoeba_base.txt"
+    tatoeba_trigrams_path = DATA_DIR / "tatoeba_trigrams.txt"
     supplement_path = DATA_DIR / "modern_supplement.tsv"
+
+    us_header, aosp_us, aosp_us_bigrams = parse_aosp_combined(us_text)
+    gb_header, aosp_gb, _ = parse_aosp_combined(gb_text)
+    scowl = load_scowl_base(scowl_path)
+    tatoeba = load_tatoeba_base(tatoeba_path)
+    supplement = load_modern_supplement(supplement_path)
+
+    lexicon_rows = build_lexicon(aosp_us, aosp_gb, scowl, supplement)
+    valid_keys = {k for k, _w, _t, _wt, avoid, _fl in lexicon_rows if not avoid}
+    avoid_keys = {k for k, _w, _t, _wt, avoid, _fl in lexicon_rows if avoid}
+    tatoeba_trigrams = load_or_extract_tatoeba_trigrams(
+        tatoeba_trigrams_path,
+        args.tatoeba_sentences,
+        valid_keys,
+        avoid_keys,
+        refresh=args.refresh_trigrams,
+    )
 
     input_digests = {
         "aosp_en_US_sha256": us_sha,
         "aosp_en_GB_sha256": gb_sha,
         "scowl_base_sha256": sha256_file(scowl_path) if scowl_path.exists() else "",
         "tatoeba_base_sha256": sha256_file(tatoeba_path) if tatoeba_path.exists() else "",
+        "tatoeba_trigrams_sha256": sha256_file(tatoeba_trigrams_path) if tatoeba_trigrams_path.exists() else "",
         "modern_supplement_sha256": sha256_file(supplement_path) if supplement_path.exists() else "",
         "compiler_sha256": sha256_file(pathlib.Path(__file__).resolve()),
     }
@@ -832,22 +1232,15 @@ def main() -> int:
             write_github_output(args.github_output, {"UPDATED": "false"})
             return 0
 
-    us_header, aosp_us, aosp_us_bigrams = parse_aosp_combined(us_text)
-    gb_header, aosp_gb, _ = parse_aosp_combined(gb_text)
-    scowl = load_scowl_base(scowl_path)
-    tatoeba = load_tatoeba_base(tatoeba_path)
-    supplement = load_modern_supplement(supplement_path)
-
-    lexicon_rows = build_lexicon(aosp_us, aosp_gb, scowl, supplement)
-    follower_rows = build_followers(aosp_us_bigrams, tatoeba, lexicon_rows)
+    follower_rows = build_followers(aosp_us_bigrams, tatoeba, tatoeba_trigrams, lexicon_rows)
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     lexicon_path = DIST_DIR / "EnglishLexicon.txt"
     followers_path = DIST_DIR / "EnglishFollowers.txt"
 
     lex_lines = [
-        f"{word}\t{tier}\t{weight}\to\n" if avoid else f"{word}\t{tier}\t{weight}\n"
-        for _key, word, tier, weight, avoid in lexicon_rows
+        f"{word}\t{tier}\t{weight}\t{flags}\n" if flags else f"{word}\t{tier}\t{weight}\n"
+        for _key, word, tier, weight, _avoid, flags in lexicon_rows
     ]
     lexicon_path.write_text("".join(lex_lines), encoding="utf-8")
 
@@ -860,6 +1253,9 @@ def main() -> int:
 
     tier_counts = collections.Counter(r[2] for r in lexicon_rows)
     offensive_count = sum(1 for r in lexicon_rows if r[4])
+    us_dialect_count = sum(1 for r in lexicon_rows if "u" in r[5])
+    uk_dialect_count = sum(1 for r in lexicon_rows if "b" in r[5])
+    trigram_key_count = sum(1 for k, _ in follower_rows if " " in k)
 
     manifest = {
         "version": version,
@@ -880,6 +1276,7 @@ def main() -> int:
             },
             "scowl_base": {"path": "data/scowl_base.txt", "license": "SCOWL"},
             "tatoeba_base": {"path": "data/tatoeba_base.txt", "license": "CC BY 2.0 FR"},
+            "tatoeba_trigrams": {"path": "data/tatoeba_trigrams.txt", "license": "CC BY 2.0 FR"},
             "modern_supplement": {"path": "data/modern_supplement.tsv", "license": "CC0-1.0"},
         },
         "input_digests": input_digests,
@@ -890,9 +1287,12 @@ def main() -> int:
                 "sha256": sha256_file(lexicon_path),
                 "tier_counts": {str(t): tier_counts[t] for t in range(4)},
                 "avoid_autocorrect_count": offensive_count,
+                "us_dialect_count": us_dialect_count,
+                "uk_dialect_count": uk_dialect_count,
             },
             "EnglishFollowers.txt": {
                 "keys": len(follower_rows),
+                "two_word_keys": trigram_key_count,
                 "bytes": followers_path.stat().st_size,
                 "sha256": sha256_file(followers_path),
             },
@@ -907,8 +1307,9 @@ def main() -> int:
     print(
         f"Built Hare English dictionary v{version}: "
         f"{len(lexicon_rows)} lexicon entries ({lexicon_path.stat().st_size // 1024} KB, "
-        f"tiers={dict(sorted(tier_counts.items()))}, avoidAutocorrect={offensive_count}), "
-        f"{len(follower_rows)} follower keys ({followers_path.stat().st_size // 1024} KB), "
+        f"tiers={dict(sorted(tier_counts.items()))}, avoidAutocorrect={offensive_count}, "
+        f"us={us_dialect_count}, uk={uk_dialect_count}), "
+        f"{len(follower_rows)} follower keys ({trigram_key_count} 2-word, {followers_path.stat().st_size // 1024} KB), "
         f"rime zip {zip_path.stat().st_size // 1024} KB."
     )
     print("UPDATED=true")
